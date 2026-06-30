@@ -1,0 +1,154 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+    tags:     ["v*"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  REGISTRY: ghcr.io
+  SWARMD_IMAGE: ghcr.io/${{ github.repository_owner }}/swarmd
+  AGENT_IMAGE:  ghcr.io/${{ github.repository_owner }}/swarm-agent
+
+jobs:
+  # ── Lint & Test ──────────────────────────────────────────────────────────────
+  test:
+    name: Vet & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test -race ./...
+
+  # ── Docker images ─────────────────────────────────────────────────────────────
+  docker:
+    name: Build & Push Docker images
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push'   # skip on PRs
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── swarmd ──
+      - name: Docker metadata — swarmd
+        id: meta-swarmd
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.SWARMD_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build & push — swarmd
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.swarmd
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-swarmd.outputs.tags }}
+          labels: ${{ steps.meta-swarmd.outputs.labels }}
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+
+      # ── swarm-agent ──
+      - name: Docker metadata — swarm-agent
+        id: meta-agent
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.AGENT_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build & push — swarm-agent
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.agent
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-agent.outputs.tags }}
+          labels: ${{ steps.meta-agent.outputs.labels }}
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+
+  # ── Release binaries (tags only) ─────────────────────────────────────────────
+  release:
+    name: Release pre-compiled binaries
+    runs-on: ubuntu-latest
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Build binaries
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          BINARIES=(swarmd swarm-agent)
+          PLATFORMS=(
+            "linux   amd64"
+            "linux   arm64"
+            "darwin  amd64"
+            "darwin  arm64"
+          )
+
+          for bin in "${BINARIES[@]}"; do
+            for platform in "${PLATFORMS[@]}"; do
+              os=$(echo "$platform" | awk '{print $1}')
+              arch=$(echo "$platform" | awk '{print $2}')
+              out="dist/${bin}-${os}-${arch}"
+              echo "Building ${out}…"
+              CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
+                go build -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
+                         -o "$out" \
+                         "./cmd/${bin}"
+              tar -czf "${out}.tar.gz" -C dist "${bin}-${os}-${arch}"
+              rm "$out"
+            done
+          done
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: dist/*.tar.gz

@@ -1,0 +1,30 @@
+# syntax=docker/dockerfile:1
+
+# ── Build stage ──────────────────────────────────────────────────────────────
+FROM golang:1.26-alpine AS builder
+
+WORKDIR /src
+
+# Cache dependency downloads as a separate layer.
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY cmd/swarm-agent/ cmd/swarm-agent/
+COPY internal/        internal/
+COPY pkg/             pkg/
+
+RUN CGO_ENABLED=0 GOOS=linux \
+    go build \
+             -ldflags="-s -w" \
+             -o /out/swarm-agent \
+             ./cmd/swarm-agent
+
+# ── Runtime stage ─────────────────────────────────────────────────────────────
+FROM alpine:3.20
+
+RUN apk --no-cache add ca-certificates tzdata
+
+COPY --from=builder /out/swarm-agent /usr/local/bin/swarm-agent
+
+ENTRYPOINT ["swarm-agent"]
+# Override with: -swarmd, -token, -id, -capabilities, -models, -opencode …

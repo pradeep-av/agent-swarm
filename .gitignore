@@ -1,0 +1,14 @@
+# Build artifacts
+bin/
+*.out
+
+# Go dependencies vendored locally
+vendor/
+
+# IDE and OS artifacts
+.DS_Store
+.vscode/
+
+# Env files
+.env
+.env.*
